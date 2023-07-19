@@ -1,0 +1,22 @@
+name: Add user on monitoring PRs
+
+on:
+  pull_request:
+    types: [opened]
+
+jobs:
+  add_reviewer:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Add Reviewer
+        id: add_reviewer
+        run: |
+          reviewers="opokornyy"
+
+          curl -X POST \
+            -H "Authorization: Bearer {{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d '{"reviewers": ["'"$reviewers"'"]}' \
+            "https://api.github.com/repos/{{ github.repository }}/pulls/{{ github.event.pull_request.number }}/requested_reviewers"
+            
