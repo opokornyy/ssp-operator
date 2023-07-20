@@ -1,4 +1,4 @@
-# Configuration
+# Configuratio
 
 Operator configuration can be modified by editing the SSP Custom Resource (CR).
 See [SSP Specification](https://github.com/kubevirt/ssp-operator/blob/main/api/v1beta2/ssp_types.go#L74)
