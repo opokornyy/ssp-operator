@@ -99,19 +99,15 @@ func runPrometheusServer(metricsAddr string, tlsOptions common.SSPTLSOptions) er
 	return nil
 }
 
-func getWebhookServer(sspTLSOptions common.SSPTLSOptions) *webhook.Server {
+func getWebhookServer(sspTLSOptions common.SSPTLSOptions, callback func(cfg *tls.Config)) *webhook.Server {
 	// If TLSSecurityProfile is empty, we want to return nil so that the default
 	// webhook server configuration is used.
 	if sspTLSOptions.IsEmpty() {
 		return nil
 	}
 
-	tlsCfgFunc := func(cfg *tls.Config) {
-		cfg.CipherSuites = sspTLSOptions.CipherIDs(&setupLog)
-		setupLog.Info("Configured ciphers", "ciphers", cfg.CipherSuites)
-	}
-
-	funcs := []func(*tls.Config){tlsCfgFunc}
+	// callback to get updated config for every request
+	funcs := []func(*tls.Config){callback}
 	return &webhook.Server{Port: webhookPort, TLSMinVersion: sspTLSOptions.MinTLSVersion, TLSOpts: funcs}
 }
 
@@ -138,16 +134,51 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 
+	// remove this later - now it is used just for prometheus
+	// not webhooks
 	tlsOptions, err := common.GetSspTlsOptions(ctx)
 	if err != nil {
 		setupLog.Error(err, "Error while getting tls profile")
 		os.Exit(1)
 	}
 
+	tlsCfgFunc := func(cfg *tls.Config) {
+		// This callback executes on each client call returning a new config to be used
+		// please be aware that the APIServer is using http keepalive so this is going to
+		// be executed only after a while for fresh connections and not on existing ones
+		cfg.GetConfigForClient = func(_ *tls.ClientHelloInfo) (*tls.Config, error) {
+			fmt.Printf("Callback called\n")
+			// get CR settings
+			tlsOptions, err := common.GetSspTlsOptions(ctx)
+			if err != nil {
+				setupLog.Error(err, "Error while getting tls profile")
+				os.Exit(1)
+			}
+
+			if tlsOptions.IsEmpty() {
+				fmt.Printf("Callback no CR set\n")
+				// profileType := ocpv1.TLSProfileIntermediateType
+				// tlsProfileSpec := ocpv1.TLSProfiles[profileType]
+
+				// nil value should force the usage of default values
+				// if there is no value in CR set already
+				cfg.CipherSuites = nil
+				return cfg, nil
+			}
+			fmt.Printf("Callback used CR values\n")
+			// Use values from CR
+			cfg.CipherSuites = tlsOptions.CipherIDs(&setupLog)
+			// TODO check MinVersion for custom profile
+			setupLog.Info("Configured ciphers", "ciphers", cfg.CipherSuites)
+			return cfg, nil
+		}
+	}
+
 	err = runPrometheusServer(metricsAddr, *tlsOptions)
 	if err != nil {
 		setupLog.Error(err, "unable to start prometheus server")
-		os.Exit(1)
+		// this will probably cause some error logs
+		// os.Exit(1)
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -156,8 +187,13 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       leaderElectionID,
-		// If WebhookServer is set to nil, a default one will be created.
-		WebhookServer: getWebhookServer(*tlsOptions),
+		// If WebhookServer is set to nil, the default one will be created.
+		WebhookServer: getWebhookServer(*tlsOptions, tlsCfgFunc),
+
+		// this should be used if WebhookServer is nil, we are
+		// setting here the callback to get always updated
+		// config
+		TLSOpts: []func(*tls.Config){tlsCfgFunc},
 	})
 
 	if err != nil {

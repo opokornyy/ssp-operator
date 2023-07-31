@@ -239,9 +239,10 @@ func (r *sspReconciler) isRestartNeeded(sspObj *ssp.SSP) bool {
 	if reflect.DeepEqual(r.lastSspSpec, ssp.SSPSpec{}) {
 		return false
 	}
-	if !reflect.DeepEqual(r.lastSspSpec.TLSSecurityProfile, sspObj.Spec.TLSSecurityProfile) {
-		return true
-	}
+	// This code will force restart when tlsProfiles are changed
+	// if !reflect.DeepEqual(r.lastSspSpec.TLSSecurityProfile, sspObj.Spec.TLSSecurityProfile) {
+	// 	return true
+	// }
 	return false
 }
 
