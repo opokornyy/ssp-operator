@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/openshift/library-go/pkg/crypto"
 
 	"kubevirt.io/ssp-operator/internal/common"
 	"kubevirt.io/ssp-operator/internal/template-validator/logger"
@@ -192,8 +193,8 @@ func (ti *TLSInfo) CreateTlsConfig() *tls.Config {
 	}
 
 	if !ti.sspTLSOptions.IsEmpty() {
-		tlsConfig.CipherSuites = ti.sspTLSOptions.CipherIDs(nil)
-		minVersion, err := ti.sspTLSOptions.MinTLSVersionId()
+		tlsConfig.CipherSuites = common.CipherIDs(ti.sspTLSOptions.OpenSSLCipherNames)
+		minVersion, err := crypto.TLSVersion(ti.sspTLSOptions.MinTLSVersion)
 		if err != nil {
 			panic(fmt.Sprintf("TLS Configuration broken, min version misconfigured %v", err))
 		}

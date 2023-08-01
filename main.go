@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -26,10 +27,13 @@ import (
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	ocpconfigv1 "github.com/openshift/api/config/v1"
+	"github.com/openshift/library-go/pkg/crypto"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -66,7 +70,47 @@ const (
 	webhookPort = 9443
 )
 
-func runPrometheusServer(metricsAddr string, tlsOptions common.SSPTLSOptions) error {
+func getConfigForClientCallback(cfg *tls.Config) (*tls.Config, error) {
+	var err error
+
+	if controllers.TLSProfile == nil {
+		cfg.MinVersion = crypto.DefaultTLSVersion()
+		cfg.CipherSuites = nil
+		return cfg, nil
+	}
+
+	if controllers.TLSProfile.Type == ocpconfigv1.TLSProfileCustomType {
+		cfg.CipherSuites = common.CipherIDs(controllers.TLSProfile.Custom.Ciphers)
+		cfg.MinVersion, err = crypto.TLSVersion(string(controllers.TLSProfile.Custom.MinTLSVersion))
+		if err != nil {
+			return nil, err
+		}
+		return cfg, nil
+	}
+
+	cipherNames, minTypedTLSVersion := ocpconfigv1.TLSProfiles[controllers.TLSProfile.Type].Ciphers, ocpconfigv1.TLSProfiles[controllers.TLSProfile.Type].MinTLSVersion
+	cfg.CipherSuites = common.CipherIDs(cipherNames)
+	cfg.MinVersion, err = crypto.TLSVersion(string(minTypedTLSVersion))
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func getPrometheusTLSConfig(ctx context.Context, certWatcher *certwatcher.CertWatcher) *tls.Config {
+	return &tls.Config{
+		// This callback executes on each client call returning a new config to be used
+		// please be aware that the APIServer is using http keepalive so this is going to
+		// be executed only after a while for fresh connections and not on existing ones
+		GetConfigForClient: func(_ *tls.ClientHelloInfo) (*tls.Config, error) {
+			cfg := &tls.Config{}
+			cfg.GetCertificate = certWatcher.GetCertificate
+			return getConfigForClientCallback(cfg)
+		},
+	}
+}
+
+func runPrometheusServer(metricsAddr string, ctx context.Context) error {
 	setupLog.Info("Starting Prometheus metrics endpoint server with TLS")
 	metrics.Registry.MustRegister(common_templates.CommonTemplatesRestored)
 	metrics.Registry.MustRegister(common.SSPOperatorReconcilingProperly)
@@ -74,24 +118,29 @@ func runPrometheusServer(metricsAddr string, tlsOptions common.SSPTLSOptions) er
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", handler)
 
-	minTlsVersion, err := tlsOptions.MinTLSVersionId()
+	certPath := path.Join(sdkTLSDir, sdkTLSCrt)
+	keyPath := path.Join(sdkTLSDir, sdkTLSKey)
+
+	certWatcher, err := certwatcher.New(certPath, keyPath)
 	if err != nil {
 		return err
 	}
 
-	tlsConfig := tls.Config{
-		CipherSuites: tlsOptions.CipherIDs(&setupLog),
-		MinVersion:   minTlsVersion,
-	}
+	go func() {
+		if err := certWatcher.Start(ctx); err != nil {
+			setupLog.Error(err, "certificate watcher error")
+		}
+	}()
 
+	tlsConfig := getPrometheusTLSConfig(ctx, certWatcher)
 	server := http.Server{
 		Addr:      metricsAddr,
 		Handler:   mux,
-		TLSConfig: &tlsConfig,
+		TLSConfig: tlsConfig,
 	}
 
 	go func() {
-		err := server.ListenAndServeTLS(path.Join(sdkTLSDir, sdkTLSCrt), path.Join(sdkTLSDir, sdkTLSKey))
+		err := server.ListenAndServeTLS(certPath, keyPath)
 		if err != nil {
 			setupLog.Error(err, "Failed to start Prometheus metrics endpoint server")
 		}
@@ -99,20 +148,15 @@ func runPrometheusServer(metricsAddr string, tlsOptions common.SSPTLSOptions) er
 	return nil
 }
 
-func getWebhookServer(sspTLSOptions common.SSPTLSOptions) *webhook.Server {
-	// If TLSSecurityProfile is empty, we want to return nil so that the default
-	// webhook server configuration is used.
-	if sspTLSOptions.IsEmpty() {
-		return nil
+func getTLSConfigFunc(ctx context.Context) func(*tls.Config) {
+	return func(cfg *tls.Config) {
+		// This callback executes on each client call returning a new config to be used
+		// please be aware that the APIServer is using http keepalive so this is going to
+		// be executed only after a while for fresh connections and not on existing ones
+		cfg.GetConfigForClient = func(_ *tls.ClientHelloInfo) (*tls.Config, error) {
+			return getConfigForClientCallback(cfg)
+		}
 	}
-
-	tlsCfgFunc := func(cfg *tls.Config) {
-		cfg.CipherSuites = sspTLSOptions.CipherIDs(&setupLog)
-		setupLog.Info("Configured ciphers", "ciphers", cfg.CipherSuites)
-	}
-
-	funcs := []func(*tls.Config){tlsCfgFunc}
-	return &webhook.Server{Port: webhookPort, TLSMinVersion: sspTLSOptions.MinTLSVersion, TLSOpts: funcs}
 }
 
 func main() {
@@ -138,17 +182,13 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 
-	tlsOptions, err := common.GetSspTlsOptions(ctx)
-	if err != nil {
-		setupLog.Error(err, "Error while getting tls profile")
-		os.Exit(1)
-	}
-
-	err = runPrometheusServer(metricsAddr, *tlsOptions)
+	err = runPrometheusServer(metricsAddr, ctx)
 	if err != nil {
 		setupLog.Error(err, "unable to start prometheus server")
 		os.Exit(1)
 	}
+
+	getWebhookTLSConfig := []func(*tls.Config){getTLSConfigFunc(ctx)}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 common.Scheme,
@@ -156,8 +196,10 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       leaderElectionID,
-		// If WebhookServer is set to nil, a default one will be created.
-		WebhookServer: getWebhookServer(*tlsOptions),
+		WebhookServer: &webhook.Server{
+			Port:    webhookPort,
+			TLSOpts: getWebhookTLSConfig,
+		},
 	})
 
 	if err != nil {

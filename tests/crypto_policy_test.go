@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -106,19 +105,14 @@ var _ = Describe("Crypto Policy", func() {
 
 	AfterEach(func() {
 		strategy.RevertToOriginalSspCr()
-
-		// Because of bug[1], the SSP operator will move to CrashLoopBackOff state,
-		// so we need to wait until it is running.
-		// [1] - https://bugzilla.redhat.com/show_bug.cgi?id=2151248
-		Eventually(func(g Gomega) {
-			deployment := &apps.Deployment{}
-			err := apiClient.Get(ctx, client.ObjectKey{
-				Name:      strategy.GetSSPDeploymentName(),
-				Namespace: strategy.GetSSPDeploymentNameSpace(),
-			}, deployment)
-			g.Expect(err).ToNot(HaveOccurred())
-			g.Expect(deployment.Status.ReadyReplicas).To(BeNumerically(">=", 1))
-		}, env.Timeout(), time.Second).Should(Succeed())
+		deployment := &apps.Deployment{}
+		err := apiClient.Get(ctx, client.ObjectKey{
+			Name:      strategy.GetSSPDeploymentName(),
+			Namespace: strategy.GetSSPDeploymentNameSpace(),
+		}, deployment)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(deployment.Status.ReadyReplicas).To(BeNumerically(">=", 1))
+		Expect(deployment.Status.UpdatedReplicas).To(BeNumerically(">=", 1))
 	})
 
 	Context("setting Crypto Policy", func() {
