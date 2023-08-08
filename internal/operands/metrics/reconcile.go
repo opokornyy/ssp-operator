@@ -8,7 +8,7 @@ import (
 	"kubevirt.io/ssp-operator/internal/operands"
 )
 
-// Define RBAC rules needed by this operand:
+// Define RBAC ruls needed by this operand:
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=prometheusrules;servicemonitors,verbs=list;watch;create;update
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=pods;endpoints,verbs=get;list;watch
