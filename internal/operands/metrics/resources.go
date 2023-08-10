@@ -36,7 +36,7 @@ const (
 	Total_rejected_vms_increase_query              = "sum(increase(total_rejected_vms{pod=~'virt-template-validator.*'}[1h]))"
 )
 
-// RecordRulesDesc represent SSP Operator Prometheus Record Rules
+// RecordRulesDesc represent SP Operator Prometheus Record Rules
 type RecordRulesDesc struct {
 	Name        string
 	Expr        intstr.IntOrString
